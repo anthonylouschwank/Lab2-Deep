@@ -1,0 +1,106 @@
+\documentclass[9pt]{extarticle}
+\usepackage[margin=1.5cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=*, itemsep=1pt, topsep=1pt}
+\titlespacing*{\section}{0pt}{6pt}{3pt}
+\titlespacing*{\subsection}{0pt}{4pt}{2pt}
+\setlength{\parskip}{2pt}
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+\title{\vspace{-1.5cm}\large CC3092 -- Laboratorio \#2: Redes Neuronales Convolucionales (CNN)}
+\author{Anthony Lou Schwank -- 23410}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-0.9cm}
+
+\textbf{Repositorio:} \url{https://github.com/anthonylouschwank/Lab2-Deep}
+
+\section*{1. Dataset y preparación}
+Se usó \texttt{MNIST} vía \texttt{torchvision.datasets.MNIST}: 70{,}000 imágenes (60{,}000 train / 10{,}000 test), 10 clases (dígitos 0--9), \textbf{razonablemente balanceadas} (entre 5{,}421 y 6{,}742 obs.\ por clase en train, ratio mín/máx $\approx$0.80). Cada imagen es \texttt{1x28x28} en escala de grises; en crudo los píxeles son \texttt{uint8} en $[0,255]$. \texttt{ToTensor()} ya reescala a $[0,1]$, pero además normalizamos con z-score (media=0.1307, std=0.3081, calculados sobre train) para acelerar y estabilizar la convergencia. El 20\% de train se separó como validación (80/20), y el test (10{,}000 imgs.) se dejó al margen hasta la evaluación única final. Por eficiencia, el dataset completo se convirtió a un único tensor normalizado en memoria (en vez de decodificar cada imagen vía PIL dentro del \texttt{DataLoader} en cada acceso), ya que por su tamaño cabe completo en RAM.
+
+\section*{2. Investigación: capas de PyTorch para CNN}
+\textbf{\texttt{nn.Conv2d(in\_ch,out\_ch,kernel\_size,padding)}}: aplica \texttt{out\_ch} filtros convolucionales que se deslizan sobre la imagen, compartiendo los mismos pesos en todas las posiciones espaciales; \texttt{padding} controla si se preserva el tamaño espacial. \textbf{\texttt{nn.MaxPool2d(kernel\_size)}}: reduce la resolución espacial tomando el valor máximo en cada ventana, conserva las activaciones más fuertes (bordes/texturas) y aporta invarianza local a pequeñas traslaciones. \textbf{\texttt{nn.AvgPool2d(kernel\_size)}}: análogo pero promedia en vez de tomar el máximo; suaviza más la señal, típicamente resulta en mapas de features menos ``agresivos'' que max pooling. \textbf{\texttt{nn.BatchNorm2d(num\_features)}}: normaliza cada canal (media 0, var 1) sobre el mini-batch, más una transformación afín aprendible; acelera y estabiliza el entrenamiento. \textbf{\texttt{nn.Flatten()}}: aplana el tensor \texttt{(N,C,H,W)} a \texttt{(N, C*H*W)} para conectarlo a capas \texttt{Linear}. \textbf{\texttt{nn.CrossEntropyLoss()}}: combina \texttt{LogSoftmax} + \texttt{NLLLoss}; recibe logits (sin softmax previo) y las clases como enteros, ideal para clasificación multiclase.
+
+\textbf{Tensor}: estructura de datos n-dimensional de PyTorch (análoga a un arreglo de NumPy) con soporte para GPU y diferenciación automática (\texttt{autograd}), base de toda operación en una red. \textbf{Campo receptivo}: región de la imagen de entrada que influye en una unidad de una capa dada; crece al apilar capas conv/pooling, permitiendo que unidades profundas capturen patrones más globales. \textbf{Menos parámetros que un MLP}: una capa conv comparte el mismo kernel en toda la imagen en vez de tener un peso independiente por cada par (pixel de entrada, unidad de salida) como un MLP; esto reduce drásticamente los parámetros y añade equivarianza a traslación (un patrón se detecta igual sin importar dónde aparezca).
+
+\section*{3. Resultados: iteraciones MLP y CNN}
+\textbf{MLP} -- baseline: \texttt{[128]}, Adam (lr=0.001), sin regularización, batch=128, epochs=6. Búsqueda dirigida, 1--2 variables por iteración.
+\begin{center}
+\footnotesize
+\begin{tabular}{@{}clllccrr@{}}
+\toprule
+\textbf{\#} & \textbf{Cambio} & \textbf{Arq.} & \textbf{Optim/LR} & \textbf{Val Acc} & \textbf{Val F1} & \textbf{Params} & \textbf{Tiempo(s)} \\
+\midrule
+M4 & +BatchNorm1d (sobre M3) & [256,128] drop0.3+BN & adam/0.001 & \textbf{0.9758} & \textbf{0.9757} & 235,914 & 18.6 \\
+M5 & Learning rate alto & [256,128] drop0.3+BN & adam/0.01 & 0.9749 & 0.9747 & 235,914 & 16.5 \\
+M2 & Más profunda & [256,128] & adam/0.001 & 0.9743 & 0.9741 & 235,146 & 17.5 \\
+M3 & +Dropout 0.3 (sobre M2) & [256,128] drop0.3 & adam/0.001 & 0.9736 & 0.9734 & 235,146 & 17.3 \\
+M6 & Optim.\ SGD+momentum (sobre M4) & [256,128] drop0.3+BN & sgd/0.01 & 0.9732 & 0.9731 & 235,914 & 17.2 \\
+M1 & Baseline & [128] & adam/0.001 & 0.9731 & 0.9728 & 101,770 & 10.6 \\
+\bottomrule
+\end{tabular}
+\normalsize
+\end{center}
+\textbf{CNN} -- baseline: canales \texttt{(16,32)}, kernel 3, MaxPool, sin BN/dropout, Adam (lr=0.001), batch=128, epochs=6.
+\begin{center}
+\begin{tabular}{@{}clllccrr@{}}
+\toprule
+\textbf{\#} & \textbf{Cambio} & \textbf{Canales/Kernel} & \textbf{Reg./Pool} & \textbf{Val Acc} & \textbf{Val F1} & \textbf{Params} & \textbf{Tiempo(s)} \\
+\midrule
+C5 & AvgPool2d (sobre C4) & (16,32) k3 & BN+drop0.3+avg & \textbf{0.9892} & \textbf{0.9891} & 207,018 & 125.1 \\
+C6 & Kernel 5x5 (sobre C4) & (16,32) k5 & BN+drop0.3+max & 0.9888 & 0.9887 & 215,466 & 166.0 \\
+C2 & Más filtros & (32,64) k3 & sin reg.+max & 0.9882 & 0.9881 & 421,642 & 241.1 \\
+C4 & +Dropout 0.3 (sobre C3) & (16,32) k3 & BN+drop0.3+max & 0.9879 & 0.9879 & 207,018 & 133.8 \\
+C1 & Baseline & (16,32) k3 & sin reg.+max & 0.9875 & 0.9874 & 206,922 & 125.2 \\
+C3 & +BatchNorm2d (sobre C1) & (16,32) k3 & BN+max & 0.9868 & 0.9866 & 207,018 & 134.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section*{4. Análisis de curvas de pérdida}
+\textbf{MLP -- M1 (baseline):} train cruza por debajo de val en el epoch 1 y la brecha crece hasta el final (train=0.050, val=0.090): sobreajuste leve. \textbf{M2 (más profunda):} misma tendencia pero más marcada (train=0.035, val=0.090, brecha$\approx$0.055) -- más capacidad, más sobreajuste. \textbf{M3 (+Dropout):} la brecha se cierra notablemente (train=0.083, val=0.085) -- el dropout mitiga el sobreajuste de M2. \textbf{M4 (+BatchNorm, mejor MLP):} converge más rápido y termina con la brecha más pequeña de todas (train=0.080, val=0.077); dropout+BatchNorm combinados dan el mejor ajuste general. En M3, M4 y M6 el train loss final queda igual o por encima del val loss: es un artefacto de medición (dropout permanece activo en modo \texttt{train()} mientras que en la evaluación de validación está desactivado), no una señal real de mal ajuste.
+
+\textbf{CNN -- C1 (baseline):} val baja rápido y luego se estabiliza (0.040--0.049) mientras train sigue bajando (0.021): brecha creciente, sobreajuste leve. \textbf{C3 (+BatchNorm, sin dropout):} señal de sobreajuste más clara de toda la búsqueda -- val toca su mínimo cerca del epoch 3 ($\approx$0.038) y luego \emph{sube} a 0.043 en el epoch 5 mientras train sigue cayendo (0.041$\to$0.021); BatchNorm acelera la convergencia en train pero por sí solo no regulariza lo suficiente aquí. \textbf{C4 (+Dropout sobre C3):} el mismo patrón de subida al final se atenúa y la brecha final es menor (train=0.036, val=0.042). \textbf{C5 (AvgPool2d, mejor CNN):} curva de validación monótonamente decreciente durante todo el entrenamiento, sin repunte, y la brecha final es la más pequeña entre los CNN (train=0.036, val=0.040) -- el promedio suaviza más las activaciones que el máximo, actuando como regularizador adicional. No se observó \emph{underfitting} claro en ninguna de las 12 iteraciones: incluso los modelos más pequeños (M1, C1) alcanzan $>$97\% de accuracy en validación, consistente con que MNIST es una tarea relativamente simple para ambas arquitecturas en estas capacidades.
+
+\section*{5. Comparación de arquitecturas}
+\begin{center}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+\textbf{Arq.} & \textbf{Config} & \textbf{Params} & \textbf{Tiempo train (s)} & \textbf{Test Acc} & \textbf{Test Prec.} & \textbf{Test F1} \\
+\midrule
+MLP & M4 & 235,914 & 18.6 & 0.9796 & 0.9797 & 0.9795 \\
+CNN & C5 & \textbf{207,018} & 125.1 & \textbf{0.9886} & \textbf{0.9886} & \textbf{0.9885} \\
+\bottomrule
+\end{tabular}
+\end{center}
+La CNN gana en accuracy/F1 de test (+0.9 pp) usando además \textbf{menos} parámetros que la mejor MLP (207k vs.\ 236k): comparte pesos espacialmente en vez de tener una conexión densa por cada píxel, por lo que logra mejor relación parámetros/calidad. La MLP entrena $\sim$7$\times$ más rápido en esta máquina (sin GPU) porque sus operaciones son productos matriciales grandes pero pocos, mientras que las convoluciones, aunque comparten pesos, requieren muchas más operaciones secuenciales por imagen en CPU.
+
+\section*{6. Discusión}
+\textbf{Mayor impacto positivo/negativo:} en la MLP, agregar \texttt{BatchNorm1d} sobre dropout (M3$\to$M4) dio la mayor mejora (+0.0023 F1 val); cambiar el optimizador de Adam a SGD+momentum (M4$\to$M6) fue el mayor deterioro (-0.0026 F1 val). En la CNN, cambiar de MaxPool2d a AvgPool2d (C4$\to$C5) dio la mayor mejora (+0.0012 F1 val, y el mejor modelo global); agregar \texttt{BatchNorm2d} sin dropout (C1$\to$C3) fue el mayor deterioro (-0.0008 F1 val), coincidiendo con la señal de sobreajuste vista en sus curvas.
+
+\textbf{Overfitting/underfitting:} se observó sobreajuste leve a moderado en varias iteraciones (M2, C1, y sobre todo C3, ver Sección 4), identificado por la brecha creciente train/val y, en C3, por el repunte del val loss. No se observó underfitting: incluso los modelos base ya superan 97\% de accuracy en validación.
+
+\textbf{¿Ayudó la regularización?} Sí, mixta según el caso. En la CNN, \texttt{BatchNorm2d} sola empeoró el resultado (sobreajuste, C3), pero combinada con Dropout (C4) y sobre todo con AvgPool2d como regularizador implícito (C5) mejoró consistentemente sobre el baseline. En la MLP, la combinación Dropout+BatchNorm (M4) fue la mejor configuración; funcionó mejor que en la CNN sola porque la MLP con más parámetros (236k) tenía más margen para sobreajustar antes de regularizar.
+
+\textbf{MLP vs.\ CNN en test:} la CNN obtuvo mejor desempeño (98.86\% vs.\ 97.96\% accuracy) con menos parámetros en su mejor configuración. La diferencia se explica porque la CNN aprovecha la estructura espacial 2D de la imagen (filtros compartidos, campo receptivo creciente) mientras que la MLP trata cada píxel como una feature independiente tras aplanar la imagen, perdiendo toda la información de vecindad espacial.
+
+\textbf{Errores más comunes:} en ambas matrices de confusión los errores se concentran en pares de dígitos visualmente similares: 9$\leftrightarrow$4 y 7$\leftrightarrow$2 en ambos modelos, y 9$\leftrightarrow$8 particularmente en la CNN. La MLP tiene errores más numerosos y de mayor magnitud (p.ej.\ 16 nueves clasificados como cuatro) que la CNN (máximo 13, en 9$\to$8), consistente con su menor accuracy global: al no explotar la estructura espacial, le cuesta más distinguir trazos curvos parecidos.
+
+\textbf{Modelo de producción:} la CNN (C5), porque domina en ambos ejes relevantes para despliegue: mejor accuracy \emph{y} menos parámetros que la mejor MLP (207k vs.\ 236k), lo que implica un modelo más liviano y más preciso para inferencia. El mayor tiempo de \emph{entrenamiento} de la CNN es un costo único y no afecta la latencia de inferencia en producción, que depende del tamaño del modelo, favorable a la CNN.
+
+\section*{7. Conclusiones}
+La CNN superó consistentemente a la MLP en MNIST usando menos parámetros en su mejor configuración, confirmando que compartir pesos espacialmente (convolución) es más eficiente que conexiones densas para datos con estructura 2D. BatchNorm y Dropout ayudaron más cuando se combinaron entre sí o con un regularizador implícito (AvgPool) que por separado; BatchNorm sin dropout indujo sobreajuste en la CNN. Ninguna arquitectura mostró underfitting en el rango de capacidades probado, reflejo de que MNIST es una tarea sencilla incluso para modelos pequeños. Se respetó la separación estricta train/val/test, evaluando el conjunto de test una única vez sobre los modelos ya seleccionados por validación.
+
+\vspace{4pt}
+\textbf{Repositorio:} \url{https://github.com/anthonylouschwank/Lab2-Deep}
+
+\end{document}
